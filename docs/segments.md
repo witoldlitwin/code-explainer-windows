@@ -63,7 +63,7 @@ Think of highlights as a **teacher's pointer moving across the board while talki
 - `[wiring]` segments: **3-5 highlights max**. Hit only the non-obvious config choices. "Registers the auth module." and move on.
 - `[core]` segments: **8-12 highlights**. Cover every important decision, skip standard patterns.
 
-Create a unique temp directory for this session: `TMPDIR=$(mktemp -d)` (run once before dispatching agents, pass the path to each agent). Write the JSON object to `$TMPDIR/segment-{id}.json` using the Write tool. No prose, no wrapping — just the raw JSON object in the file.
+Create a unique temp directory for this session: run `explainer.ps1 tempdir` (once before dispatching agents; it prints the new directory path — pass that path to each agent). Write the JSON object to `<dir>\segment-{id}.json` using the Write tool. No prose, no wrapping — just the raw JSON object in the file.
 ```
 
 ### Example — constructor with 4 args
@@ -89,13 +89,14 @@ Not this — one highlight per line, self-contained statements that sound choppy
 
 ## Wait for all agents, then assemble from files
 
-Do NOT send anything to the sidebar until every agent has returned. Each agent writes its segment to `$TMPDIR/segment-{id}.json`. Once all agents finish, assemble and send with one bash command:
+Do NOT send anything to the sidebar until every agent has returned. Each agent writes its segment to `<dir>\segment-{id}.json`. Once all agents finish, assemble and send with one command:
 
-```bash
-jq -n --arg title "{feature} Walkthrough" '{ type: "set_plan", title: $title, segments: [inputs] }' $(for i in $(seq 0 {lastSegmentId}); do echo "$TMPDIR/segment-$i.json"; done) > "$TMPDIR/walkthrough-plan.json" && ~/.claude/skills/explainer/scripts/explainer.sh plan "$TMPDIR/walkthrough-plan.json" && rm -rf "$TMPDIR"
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\skills\explainer\scripts\explainer.ps1" assemble <dir> "{feature} Walkthrough"
+Remove-Item -Recurse -Force <dir>
 ```
 
-This avoids the main agent having to parse or re-serialize any segment JSON — `jq` handles assembly directly from the files the sub-agents wrote. The `rm -rf` at the end cleans up the temp directory.
+This avoids the main agent having to parse or re-serialize any segment JSON — `assemble` joins the `segment-*.json` files numerically into a `set_plan` and sends it. The `Remove-Item` afterwards cleans up the temp directory.
 
 ## Concurrency
 

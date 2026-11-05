@@ -1,127 +1,122 @@
 # Uninstalling Code Explainer
 
-This guide walks you through completely removing Code Explainer from your system. Each step includes a verification check so you can confirm the removal was successful.
+This guide walks you through completely removing Code Explainer from your system. Each step includes a verification check so you can confirm the removal was successful. All commands are for PowerShell.
 
 ---
 
 ## Step 1: Stop Running Processes
 
-Kill the TTS server if it's running.
+Stop the TTS server if it's running.
 
-```bash
+```powershell
 # Stop TTS server
-if [ -f /tmp/tts-server.pid ]; then
-    kill "$(cat /tmp/tts-server.pid)" 2>/dev/null
-    echo "TTS server stopped"
-else
-    echo "TTS server not running"
-fi
+$pidFile = "$env:USERPROFILE\.claude-explainer\tts-server.pid"
+if (Test-Path $pidFile) {
+    Stop-Process -Id ([int](Get-Content $pidFile)) -Force -ErrorAction SilentlyContinue
+    Write-Host "TTS server stopped"
+} else {
+    Write-Host "TTS server not running"
+}
 ```
 
 **Verify:**
 
-```bash
+```powershell
 # Should print "No TTS process found"
-if pgrep -f tts_server.py > /dev/null; then
-    echo "WARNING: TTS server still running"
-else
-    echo "No TTS process found"
-fi
+$procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*tts_server.py*' }
+if ($procs) { Write-Host "WARNING: TTS server still running" } else { Write-Host "No TTS process found" }
 ```
 
 ---
 
 ## Step 2: Uninstall the VS Code / Cursor Extension
 
-```bash
+```powershell
 # VS Code
-code --uninstall-extension srujangurram.code-explainer 2>/dev/null && echo "Removed from VS Code" || echo "Not installed in VS Code"
+code --uninstall-extension srujangurram.code-explainer
 
 # Cursor
-cursor --uninstall-extension srujangurram.code-explainer 2>/dev/null && echo "Removed from Cursor" || echo "Not installed in Cursor"
+cursor --uninstall-extension srujangurram.code-explainer
 ```
+
+(An error such as "extension not installed" simply means it was not installed in that editor.)
 
 **Verify:**
 
-```bash
+```powershell
 # Should NOT list code-explainer
-code --list-extensions 2>/dev/null | grep -i code-explainer || echo "VS Code: clean"
-cursor --list-extensions 2>/dev/null | grep -i code-explainer || echo "Cursor: clean"
+if (code --list-extensions | Select-String -Pattern code-explainer) { "VS Code: WARNING still installed" } else { "VS Code: clean" }
+if (cursor --list-extensions | Select-String -Pattern code-explainer) { "Cursor: WARNING still installed" } else { "Cursor: clean" }
 ```
 
-After uninstalling, reload your editor: **Cmd+Shift+P** → **Developer: Reload Window**
+After uninstalling, reload your editor: **Ctrl+Shift+P** → **Developer: Reload Window**
 
 ---
 
 ## Step 3: Remove the Skill Directory
 
-This removes the skill files, Python virtual environment, and TTS model cache.
+This removes the skill files, Python virtual environment, and TTS model files.
 
-```bash
-rm -rf ~/.claude/skills/explainer
+```powershell
+Remove-Item -Recurse -Force "$HOME\.claude\skills\explainer"
 ```
 
 **Verify:**
 
-```bash
-[ -d ~/.claude/skills/explainer ] && echo "WARNING: directory still exists" || echo "Skill directory removed"
+```powershell
+if (Test-Path "$HOME\.claude\skills\explainer") { "WARNING: directory still exists" } else { "Skill directory removed" }
 ```
 
 ---
 
 ## Step 4: Clean Up Runtime Files
 
-Remove temporary files created during use.
+Remove files created during use.
 
-```bash
-rm -f ~/.claude-explainer-port
-rm -f ~/.claude-explainer-token
-rm -f /tmp/tts-server.sock
-rm -f /tmp/tts-server.pid
-rm -f /tmp/tts-server.log
+```powershell
+Remove-Item -Recurse -Force "$env:USERPROFILE\.claude-explainer" -ErrorAction SilentlyContinue
+Remove-Item -Force "$env:USERPROFILE\.claude-explainer-port-*", "$env:USERPROFILE\.claude-explainer-token-*", "$env:USERPROFILE\.claude-highlight-*.json" -ErrorAction SilentlyContinue
 ```
 
 **Verify:**
 
-```bash
-for f in ~/.claude-explainer-port ~/.claude-explainer-token /tmp/tts-server.sock /tmp/tts-server.pid /tmp/tts-server.log; do
-    [ -e "$f" ] && echo "WARNING: $f still exists" || echo "$f removed"
-done
+```powershell
+foreach ($f in "$env:USERPROFILE\.claude-explainer", "$env:USERPROFILE\.claude-explainer-port-*", "$env:USERPROFILE\.claude-explainer-token-*", "$env:USERPROFILE\.claude-highlight-*.json") {
+    if (Test-Path $f) { "WARNING: $f still exists" } else { "$f removed" }
+}
 ```
 
 ---
 
 ## All-in-One Script
 
-To remove everything in one go, run this from your terminal:
+To remove everything in one go, run this from PowerShell:
 
-```bash
-#!/bin/bash
-set -e
-
-echo "Uninstalling Code Explainer..."
+```powershell
+Write-Host "Uninstalling Code Explainer..."
 
 # 1. Stop TTS server
-if [ -f /tmp/tts-server.pid ]; then
-    kill "$(cat /tmp/tts-server.pid)" 2>/dev/null || true
-    echo "  Stopped TTS server"
-fi
+$pidFile = "$env:USERPROFILE\.claude-explainer\tts-server.pid"
+if (Test-Path $pidFile) {
+    Stop-Process -Id ([int](Get-Content $pidFile)) -Force -ErrorAction SilentlyContinue
+    Write-Host "  Stopped TTS server"
+}
 
 # 2. Uninstall extension
-code --uninstall-extension srujangurram.code-explainer 2>/dev/null && echo "  Removed VS Code extension" || true
-cursor --uninstall-extension srujangurram.code-explainer 2>/dev/null && echo "  Removed Cursor extension" || true
+code --uninstall-extension srujangurram.code-explainer
+cursor --uninstall-extension srujangurram.code-explainer
 
 # 3. Remove skill directory
-rm -rf ~/.claude/skills/explainer
-echo "  Removed skill directory"
+Remove-Item -Recurse -Force "$HOME\.claude\skills\explainer" -ErrorAction SilentlyContinue
+Write-Host "  Removed skill directory"
 
 # 4. Clean up runtime files
-rm -f ~/.claude-explainer-port ~/.claude-explainer-token
-rm -f /tmp/tts-server.sock /tmp/tts-server.pid /tmp/tts-server.log
-echo "  Cleaned up runtime files"
+Remove-Item -Recurse -Force "$env:USERPROFILE\.claude-explainer" -ErrorAction SilentlyContinue
+Remove-Item -Force "$env:USERPROFILE\.claude-explainer-port-*", "$env:USERPROFILE\.claude-explainer-token-*", "$env:USERPROFILE\.claude-highlight-*.json" -ErrorAction SilentlyContinue
+Write-Host "  Cleaned up runtime files"
 
-echo ""
-echo "Done. Reload your editor: Cmd+Shift+P → 'Developer: Reload Window'"
+Write-Host ""
+Write-Host "Done. Reload your editor: Ctrl+Shift+P -> 'Developer: Reload Window'"
 ```
 
 ---
@@ -130,7 +125,7 @@ echo "Done. Reload your editor: Cmd+Shift+P → 'Developer: Reload Window'"
 
 | Component | Location | Size |
 |-----------|----------|------|
-| Skill files + venv + TTS model | `~/.claude/skills/explainer/` | ~500 MB |
+| Skill files + venv + TTS model | `%USERPROFILE%\.claude\skills\explainer\` | ~500 MB |
 | VS Code extension | Editor extensions directory | ~1 MB |
-| Port/token files | `~/.claude-explainer-port`, `~/.claude-explainer-token` | <1 KB |
-| TTS runtime files | `/tmp/tts-server.*` | <1 KB |
+| Port/token/highlight files (one set per editor) | `%USERPROFILE%\.claude-explainer-port-<editor>`, `%USERPROFILE%\.claude-explainer-token-<editor>`, `%USERPROFILE%\.claude-highlight-<editor>.json` | <1 KB |
+| TTS runtime files | `%USERPROFILE%\.claude-explainer\` | <1 KB |

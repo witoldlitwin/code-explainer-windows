@@ -2,9 +2,9 @@
 
 ## Engine
 
-**Kokoro-82M** via mlx-audio — top-ranked open-source TTS, runs locally on Apple Silicon. Configurable via `TTS_MODEL` env var.
+**Kokoro-82M** via kokoro-onnx (ONNX Runtime, CPU) — top-ranked open-source TTS, runs locally. Model files (`kokoro-v1.0.onnx` and `voices-v1.0.bin`, ~330 MB, downloaded by setup) live in `<skill>\models\` by default. Set the `TTS_MODEL_DIR` env var to use a different directory containing them.
 
-Persistent server (`tts_server.py`) loads model once. First call ~5s (model load), subsequent ~450ms (streaming). Starts automatically on first TTS call. Falls back to macOS `say` if mlx-audio not installed.
+Persistent server (`tts_server.py`) loads model once and streams audio over localhost TCP (127.0.0.1, OS-assigned port, token auth). First call ~5s (model load), subsequent ~450ms (streaming). Starts automatically on first TTS call. Runtime files: `%USERPROFILE%\.claude-explainer\tts-server.{port,token,pid,log}`.
 
 ## Behavior
 

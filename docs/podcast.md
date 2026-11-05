@@ -28,19 +28,18 @@ Synthesize the entire walkthrough into a single WAV file. No sidebar or highligh
 
 2. **Generate:**
 
-```bash
-cat > /tmp/walkthrough-plan.json << 'PLAN_EOF'
-{ "title": "...", "voice": "af_heart", "speed": 1.0, "segments": [...] }
-PLAN_EOF
-python3 ~/.claude/skills/explainer/scripts/podcast.py /tmp/walkthrough-plan.json
+Write the plan JSON with the Write tool to `$env:TEMP\walkthrough-plan.json`, then:
+
+```powershell
+& "$HOME\.claude\skills\explainer\.venv\Scripts\python.exe" "$HOME\.claude\skills\explainer\scripts\podcast.py" "$env:TEMP\walkthrough-plan.json"
 ```
 
 Optional custom output path:
-```bash
-python3 ~/.claude/skills/explainer/scripts/podcast.py /tmp/walkthrough-plan.json ~/Desktop/auth-walkthrough.wav
+```powershell
+& "$HOME\.claude\skills\explainer\.venv\Scripts\python.exe" "$HOME\.claude\skills\explainer\scripts\podcast.py" "$env:TEMP\walkthrough-plan.json" "$env:USERPROFILE\Desktop\auth-walkthrough.wav"
 ```
 
-3. **Tell user the file path.** Offer to play: `open ./feature-name-walkthrough-podcast.wav`
+3. **Tell user the file path.** Offer to play: `Start-Process .\feature-name-walkthrough-podcast.wav`
 
 ## Narration style
 

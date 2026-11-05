@@ -8,8 +8,16 @@ import type { Walkthrough } from "./walkthrough";
 import type { AgentMessage, ExtensionMessage, UserActionMessage } from "./types";
 import type { WalkthroughStorage } from "./storage";
 
-const PORT_FILE = path.join(os.homedir(), ".claude-explainer-port");
-const TOKEN_FILE = path.join(os.homedir(), ".claude-explainer-token");
+/**
+ * Port/token files are per editor (e.g. ".claude-explainer-port-vscode",
+ * ".claude-explainer-port-vscode-insiders") so several editors can run side by side.
+ */
+export function portFileFor(editorId: string): string {
+	return path.join(os.homedir(), `.claude-explainer-port-${editorId}`);
+}
+export function tokenFileFor(editorId: string): string {
+	return path.join(os.homedir(), `.claude-explainer-token-${editorId}`);
+}
 const MAX_BODY_SIZE = 1024 * 1024; // 1MB
 const MAX_LONG_POLL_TIMEOUT = 120_000; // 2 minutes
 
@@ -34,8 +42,13 @@ export class ExplainerServer {
 	private authToken: string;
 	private storage: WalkthroughStorage | undefined;
 
-	constructor(walkthrough: Walkthrough) {
+	private portFile: string;
+	private tokenFile: string;
+
+	constructor(walkthrough: Walkthrough, editorId: string) {
 		this.walkthrough = walkthrough;
+		this.portFile = portFileFor(editorId);
+		this.tokenFile = tokenFileFor(editorId);
 		this.authToken = crypto.randomBytes(32).toString("hex");
 		this.httpServer = http.createServer(this.handleHttp.bind(this));
 		this.wss = new WebSocketServer({
@@ -54,8 +67,8 @@ export class ExplainerServer {
 			this.httpServer.listen(0, "127.0.0.1", () => {
 				const addr = this.httpServer.address();
 				this.port = typeof addr === "object" && addr ? addr.port : 0;
-				fs.writeFileSync(PORT_FILE, String(this.port), "utf-8");
-				fs.writeFileSync(TOKEN_FILE, this.authToken, { encoding: "utf-8", mode: 0o600 });
+				fs.writeFileSync(this.portFile, String(this.port), "utf-8");
+				fs.writeFileSync(this.tokenFile, this.authToken, { encoding: "utf-8", mode: 0o600 });
 				resolve(this.port);
 			});
 		});
@@ -65,11 +78,13 @@ export class ExplainerServer {
 		for (const ws of this.wsClients) ws.close();
 		this.wss.close();
 		this.httpServer.close();
+		// Only remove the files if they still belong to this window; another window
+		// of the same editor may have started later and taken them over.
 		try {
-			fs.unlinkSync(PORT_FILE);
-		} catch {}
-		try {
-			fs.unlinkSync(TOKEN_FILE);
+			if (fs.readFileSync(this.tokenFile, "utf-8").trim() === this.authToken) {
+				fs.unlinkSync(this.tokenFile);
+				fs.unlinkSync(this.portFile);
+			}
 		} catch {}
 	}
 

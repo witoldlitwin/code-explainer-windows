@@ -33,24 +33,25 @@ Sidebar-driven playback. Send the walkthrough plan to the sidebar extension whic
 
 2. **Send to sidebar:**
 
-```bash
-cat > /tmp/walkthrough-plan.json << 'EOF'
-{ "type": "set_plan", "title": "...", "segments": [...] }
-EOF
-~/.claude/skills/explainer/scripts/explainer.sh plan /tmp/walkthrough-plan.json
+Write the plan JSON with the Write tool to `$env:TEMP\walkthrough-plan.json` (full path, e.g. `C:\Users\<you>\AppData\Local\Temp\walkthrough-plan.json`), then:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\skills\explainer\scripts\explainer.ps1" plan "$env:TEMP\walkthrough-plan.json"
 ```
+
+(`$env:TEMP` works in PowerShell; from Git Bash use the resolved path.)
 
 The sidebar loads the plan and shows the first segment's code location. Playback does NOT start automatically — the user must press the Play button on the sidebar to begin. Tell the user: **"Press ▶ Play on the sidebar to start the walkthrough."**
 
 3. **Handle user actions (optional):**
 
-```bash
-~/.claude/skills/explainer/scripts/explainer.sh wait-action 60
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\skills\explainer\scripts\explainer.ps1" wait-action 60
 ```
 
 Returns e.g. `{"type": "user_action", "action": "next", "segmentId": 3}`. Handle as needed with `goto`, `insert_after`, or `resume` commands.
 
-4. **Other commands:** `explainer.sh state` (check state), `explainer.sh stop` (stop walkthrough).
+4. **Other commands:** `explainer.ps1 state` (check state), `explainer.ps1 stop` (stop walkthrough).
 
 ## Segment guidelines
 

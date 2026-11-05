@@ -25,15 +25,25 @@
 			{ "command": "codeExplainer.loadWalkthrough", "title": "Code Explainer: Load Walkthrough" }
 		],
 		"keybindings": [
-			{ "command": "codeExplainer.togglePlayPause", "key": "ctrl+shift+space", "when": "codeExplainer.walkthroughActive" },
-			{ "command": "codeExplainer.next", "key": "ctrl+shift+]", "when": "codeExplainer.walkthroughActive" },
-			{ "command": "codeExplainer.prev", "key": "ctrl+shift+[", "when": "codeExplainer.walkthroughActive" },
-			{ "command": "codeExplainer.nextSegment", "key": "ctrl+shift+alt+]", "when": "codeExplainer.walkthroughActive" },
-			{ "command": "codeExplainer.prevSegment", "key": "ctrl+shift+alt+[", "when": "codeExplainer.walkthroughActive" },
-			{ "command": "codeExplainer.stop", "key": "ctrl+shift+\\", "when": "codeExplainer.walkthroughActive" },
-			{ "command": "codeExplainer.speedUp", "key": "ctrl+shift+=", "when": "codeExplainer.walkthroughActive" },
-			{ "command": "codeExplainer.speedDown", "key": "ctrl+shift+-", "when": "codeExplainer.walkthroughActive" }
+			{ "command": "codeExplainer.togglePlayPause", "key": "ctrl+alt+space", "when": "codeExplainer.walkthroughActive" },
+			{ "command": "codeExplainer.next", "key": "ctrl+alt+]", "when": "codeExplainer.walkthroughActive" },
+			{ "command": "codeExplainer.prev", "key": "ctrl+alt+[", "when": "codeExplainer.walkthroughActive" },
+			{ "command": "codeExplainer.nextSegment", "key": "ctrl+alt+shift+]", "when": "codeExplainer.walkthroughActive" },
+			{ "command": "codeExplainer.prevSegment", "key": "ctrl+alt+shift+[", "when": "codeExplainer.walkthroughActive" },
+			{ "command": "codeExplainer.stop", "key": "ctrl+alt+\\", "when": "codeExplainer.walkthroughActive" },
+			{ "command": "codeExplainer.speedUp", "key": "ctrl+alt+=", "when": "codeExplainer.walkthroughActive" },
+			{ "command": "codeExplainer.speedDown", "key": "ctrl+alt+-", "when": "codeExplainer.walkthroughActive" }
 		],
+		"configuration": {
+			"title": "Code Explainer",
+			"properties": {
+				"codeExplainer.autoAdvance": {
+					"type": "boolean",
+					"default": false,
+					"description": "Automatically move to the next step when its narration ends. When off, playback stops after each step and waits for Next/Previous."
+				}
+			}
+		},
 		"viewsContainers": {
 			"activitybar": [
 				{

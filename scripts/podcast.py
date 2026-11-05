@@ -21,73 +21,16 @@ Requires the TTS server to be running (tts_server.py).
 
 import json
 import os
-import socket
-import struct
+import re
 import sys
 import wave
 
-SOCKET_PATH = "/tmp/tts-server.sock"
-SAMPLE_RATE = 24000  # Kokoro-82M default sample rate
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tts_client  # noqa: E402
+
+SAMPLE_RATE = tts_client.SAMPLE_RATE  # Kokoro-82M default sample rate
 PAUSE_SECONDS = 0.8  # Silence between segments
-
-
-def ensure_tts_server():
-    """Start the TTS server if it's not already running."""
-    if os.path.exists(SOCKET_PATH):
-        return
-
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    server_script = os.path.join(script_dir, "tts_server.py")
-
-    print("[podcast] TTS server not running, starting it...")
-    import subprocess
-    subprocess.run([sys.executable, server_script, "--daemon"], check=True)
-
-    # Wait for socket to appear
-    import time
-    for _ in range(30):
-        if os.path.exists(SOCKET_PATH):
-            return
-        time.sleep(1)
-    print("[podcast] Error: TTS server did not start in time.", file=sys.stderr)
-    sys.exit(1)
-
-
-def synthesize(text: str, voice: str, speed: float) -> bytes:
-    """Send text to the TTS server and collect all audio chunks as raw float32 bytes."""
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(SOCKET_PATH)
-
-    request = json.dumps({"text": text, "voice": voice, "speed": speed}).encode()
-    sock.sendall(request)
-    sock.shutdown(socket.SHUT_WR)  # Signal end of request
-
-    audio_data = b""
-    while True:
-        header = _recv_exactly(sock, 4)
-        if header is None:
-            break
-        length = struct.unpack("!I", header)[0]
-        if length == 0:
-            break
-        chunk = _recv_exactly(sock, length)
-        if chunk is None:
-            break
-        audio_data += chunk
-
-    sock.close()
-    return audio_data
-
-
-def _recv_exactly(sock, n: int) -> bytes | None:
-    """Receive exactly n bytes from socket."""
-    data = b""
-    while len(data) < n:
-        chunk = sock.recv(n - len(data))
-        if not chunk:
-            return None
-        data += chunk
-    return data
+synthesize = tts_client.synthesize
 
 
 def float32_to_int16(raw: bytes) -> bytes:
@@ -112,7 +55,7 @@ def main():
         sys.exit(1)
 
     plan_path = sys.argv[1]
-    with open(plan_path) as f:
+    with open(plan_path, encoding="utf-8") as f:
         plan = json.load(f)
 
     title = plan.get("title", "walkthrough")
@@ -123,10 +66,14 @@ def main():
 
     voice = plan.get("voice", os.environ.get("TTS_VOICE", "af_heart"))
     speed = plan.get("speed", float(os.environ.get("TTS_SPEED", "1.0")))
-    default_name = f"{title.replace(' ', '-').lower()}-podcast.wav"
+    slug = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", title.replace(" ", "-").lower())
+    slug = slug.strip(" .") or "walkthrough"
+    default_name = f"{slug}-podcast.wav"
     output_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.getcwd(), default_name)
 
-    ensure_tts_server()
+    if not tts_client.ensure_server():
+        print("[podcast] Error: TTS server did not start in time.", file=sys.stderr)
+        sys.exit(1)
 
     silence = generate_silence(PAUSE_SECONDS)
     all_audio = b""

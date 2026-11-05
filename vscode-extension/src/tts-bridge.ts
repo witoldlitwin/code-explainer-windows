@@ -1,10 +1,9 @@
 import * as net from "net";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import * as cp from "child_process";
 
-const SOCKET_PATH = "/tmp/tts-server.sock";
-const PID_FILE = "/tmp/tts-server.pid";
 const SAMPLE_RATE = 24000;
 const SERVER_START_TIMEOUT_MS = 30_000;
 
@@ -13,12 +12,40 @@ export interface TTSOptions {
 	speed: number;
 }
 
+function runtimeDir(): string {
+	return path.join(os.homedir(), ".claude-explainer");
+}
+const portFile = () => path.join(runtimeDir(), "tts-server.port");
+const tokenFile = () => path.join(runtimeDir(), "tts-server.token");
+const pidFile = () => path.join(runtimeDir(), "tts-server.pid");
+
+/** Read the server TCP port, or undefined if missing/invalid. */
+function readPort(): number | undefined {
+	try {
+		const port = parseInt(fs.readFileSync(portFile(), "ascii").trim(), 10);
+		return Number.isInteger(port) && port > 0 && port < 65536 ? port : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Read the auth token, or undefined if missing/invalid. */
+function readToken(): string | undefined {
+	try {
+		const token = fs.readFileSync(tokenFile(), "utf-8").trim();
+		return token || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Check if the TTS server process is alive by verifying the PID file.
  */
 function isServerProcessAlive(): boolean {
 	try {
-		const pid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10);
+		const pid = parseInt(fs.readFileSync(pidFile(), "utf-8").trim(), 10);
+		if (!Number.isInteger(pid) || pid <= 0) return false;
 		process.kill(pid, 0); // signal 0 = check alive
 		return true;
 	} catch {
@@ -27,10 +54,10 @@ function isServerProcessAlive(): boolean {
 }
 
 /**
- * Remove stale socket and PID files left by a dead server.
+ * Remove stale port, token and PID files left by a dead server.
  */
 function cleanupStaleFiles(): void {
-	for (const p of [SOCKET_PATH, PID_FILE]) {
+	for (const p of [portFile(), tokenFile(), pidFile()]) {
 		try {
 			fs.unlinkSync(p);
 		} catch {}
@@ -38,19 +65,26 @@ function cleanupStaleFiles(): void {
 }
 
 /**
- * Ping the server over the socket to verify it's responsive.
+ * Ping the server over TCP to verify it's responsive.
  * Resolves true if alive, false otherwise.
  */
 function pingServer(): Promise<boolean> {
 	return new Promise((resolve) => {
-		const conn = net.createConnection(SOCKET_PATH);
+		const port = readPort();
+		const token = readToken();
+		if (port === undefined || token === undefined) {
+			resolve(false);
+			return;
+		}
+
+		const conn = net.createConnection({ host: "127.0.0.1", port });
 		const timeout = setTimeout(() => {
 			conn.destroy();
 			resolve(false);
 		}, 2000);
 
 		conn.on("connect", () => {
-			conn.end(JSON.stringify({ ping: true }), "utf-8");
+			conn.end(JSON.stringify({ token, ping: true }), "utf-8");
 		});
 
 		conn.on("data", () => {
@@ -60,6 +94,11 @@ function pingServer(): Promise<boolean> {
 		});
 
 		conn.on("error", () => {
+			clearTimeout(timeout);
+			resolve(false);
+		});
+
+		conn.on("close", () => {
 			clearTimeout(timeout);
 			resolve(false);
 		});
@@ -80,10 +119,20 @@ export function setWorkspaceRoot(root: string): void {
 function getProjectRootCandidates(): string[] {
 	const candidates: string[] = [];
 	if (workspaceRoot) candidates.push(workspaceRoot);
-	const home = process.env.HOME || "";
+	// Explicit Claude config dir, if VS Code inherited it
+	const configDir = process.env.CLAUDE_CONFIG_DIR;
+	if (configDir) candidates.push(path.join(configDir, "skills", "explainer"));
+	const home = os.homedir();
 	if (home) {
-		// Skills directory (installed via claude skill)
+		// Skills directories: ~/.claude plus any ~/.claude-* profile (e.g. .claude-personal, .claude-work)
 		candidates.push(path.join(home, ".claude", "skills", "explainer"));
+		try {
+			for (const entry of fs.readdirSync(home, { withFileTypes: true })) {
+				if (entry.isDirectory() && entry.name.startsWith(".claude-")) {
+					candidates.push(path.join(home, entry.name, "skills", "explainer"));
+				}
+			}
+		} catch {}
 	}
 	return candidates;
 }
@@ -100,16 +149,16 @@ function getServerScript(): string | undefined {
 }
 
 /**
- * Find the venv Python that has mlx-audio installed.
+ * Find the venv Python that has the TTS dependencies installed.
  */
 function findVenvPython(): string {
 	for (const root of getProjectRootCandidates()) {
-		const venvPython = path.join(root, ".venv", "bin", "python3");
+		const venvPython = path.join(root, ".venv", "Scripts", "python.exe");
 		if (fs.existsSync(venvPython)) {
 			return path.resolve(venvPython);
 		}
 	}
-	return "python3";
+	return "python";
 }
 
 /**
@@ -131,24 +180,38 @@ function startServer(): Promise<boolean> {
 		const env = { ...process.env };
 		if (workspaceRoot) env.TTS_WORKSPACE_ROOT = workspaceRoot;
 
-		cp.execFile(pythonBin, [serverScript, "--daemon"], { timeout: 10_000, env }, (err) => {
-			if (err) {
-				console.error("[tts-bridge] Failed to start server daemon:", err);
-				clearInterval(poll);
-				resolve(false);
-			}
-		});
+		let poll: NodeJS.Timeout | undefined;
+		let polling = false;
 
-		// Poll for socket to appear, then ping to confirm server is ready
+		cp.execFile(
+			pythonBin,
+			[serverScript, "--daemon"],
+			{ timeout: 10_000, env, windowsHide: true },
+			(err) => {
+				if (err) {
+					console.error("[tts-bridge] Failed to start server daemon:", err);
+					if (poll) clearInterval(poll);
+					resolve(false);
+				}
+			},
+		);
+
+		// Poll for port file to appear, then ping to confirm server is ready
 		const deadline = Date.now() + SERVER_START_TIMEOUT_MS;
-		const poll = setInterval(async () => {
-			if (fs.existsSync(SOCKET_PATH) && await pingServer()) {
-				clearInterval(poll);
-				resolve(true);
-			} else if (Date.now() > deadline) {
-				clearInterval(poll);
-				console.error("[tts-bridge] Server did not start in time.");
-				resolve(false);
+		poll = setInterval(async () => {
+			if (polling) return;
+			polling = true;
+			try {
+				if (readPort() !== undefined && (await pingServer())) {
+					clearInterval(poll);
+					resolve(true);
+				} else if (Date.now() > deadline) {
+					clearInterval(poll);
+					console.error("[tts-bridge] Server did not start in time.");
+					resolve(false);
+				}
+			} finally {
+				polling = false;
 			}
 		}, 500);
 	});
@@ -172,13 +235,22 @@ export async function ensureServer(): Promise<boolean> {
 }
 
 async function ensureServerImpl(): Promise<boolean> {
-	// Fast path: socket exists and server responds to ping
-	if (fs.existsSync(SOCKET_PATH)) {
+	// Fast path: port file exists and server responds to ping
+	if (fs.existsSync(portFile())) {
 		if (await pingServer()) {
 			return true;
 		}
-		// Socket exists but server is dead — clean up
-		console.log("[tts-bridge] Stale socket detected, cleaning up...");
+		if (isServerProcessAlive()) {
+			// Process alive but ping failed (e.g. busy synthesizing): retry, never respawn.
+			for (let i = 0; i < 3; i++) {
+				await new Promise((r) => setTimeout(r, 1000));
+				if (await pingServer()) return true;
+			}
+			console.warn("[tts-bridge] Server process alive but not responding; TTS unavailable for this call.");
+			return false;
+		}
+		// Port file exists but server is dead — clean up
+		console.log("[tts-bridge] Stale server files detected, cleaning up...");
 		cleanupStaleFiles();
 	}
 
@@ -233,10 +305,23 @@ function connectAndStream(
 ): net.Socket {
 	let ended = false;
 
-	const conn = net.createConnection(SOCKET_PATH);
+	const port = readPort();
+	const token = readToken();
+	const conn = new net.Socket();
+
+	if (port === undefined || token === undefined) {
+		setImmediate(() => {
+			if (!isAborted()) onError(new Error("TTS server port/token unavailable"));
+		});
+		return conn;
+	}
 
 	conn.on("connect", () => {
 		const request = JSON.stringify({
+			token,
+			// One id per extension host: a new request from this window
+			// cancels the server's work on any older one.
+			client: `ext-${process.pid}`,
 			text,
 			voice: options.voice,
 			speed: options.speed,
@@ -289,6 +374,8 @@ function connectAndStream(
 		}
 	});
 
+	conn.connect({ host: "127.0.0.1", port });
+
 	return conn;
 }
 
@@ -297,8 +384,8 @@ function connectAndStream(
  * For a more reliable check that auto-starts the server, use streamTTS directly.
  */
 export function isTTSAvailable(): boolean {
-	// If socket exists and process is alive, likely available
-	if (fs.existsSync(SOCKET_PATH) && isServerProcessAlive()) {
+	// If port file exists and process is alive, likely available
+	if (fs.existsSync(portFile()) && isServerProcessAlive()) {
 		return true;
 	}
 	// Even if server is down, we can auto-start it — so report available

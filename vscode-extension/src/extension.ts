@@ -12,7 +12,9 @@ import type { AgentMessage, FromWebviewMessage, Segment, Highlight } from "./typ
 
 // ── File-watcher fallback (backward compat) ──
 
-const HIGHLIGHT_FILE = path.join(os.homedir(), ".claude-highlight.json");
+/** Editor id used to keep runtime files apart, e.g. "vscode", "vscode-insiders", "cursor". */
+const EDITOR_ID = (vscode.env.uriScheme || "vscode").replace(/[^a-z0-9-]/gi, "") || "vscode";
+const HIGHLIGHT_FILE = path.join(os.homedir(), `.claude-highlight-${EDITOR_ID}.json`);
 
 interface HighlightRequest {
 	file: string;
@@ -75,14 +77,19 @@ interface SegmentTTSPlan {
 	totalChunks: number;
 }
 
-function buildSegmentTTSPlan(highlights: Highlight[], startFrom = 0): SegmentTTSPlan {
+/** Auto-advance to the next step when its narration ends (setting; default off = wait for Next/Prev). */
+function autoAdvanceEnabled(): boolean {
+	return vscode.workspace.getConfiguration("codeExplainer").get<boolean>("autoAdvance", false);
+}
+
+function buildSegmentTTSPlan(highlights: Highlight[], startFrom = 0, maxHighlights = Infinity): SegmentTTSPlan {
 	const SPLIT_RE = /(?<=[.!?])\s+/;
 	const chunkBoundaries: number[] = [];
 	const highlightIndices: number[] = [];
 	const textParts: string[] = [];
 	let totalChunks = 0;
 
-	for (let i = startFrom; i < highlights.length; i++) {
+	for (let i = startFrom; i < highlights.length && highlightIndices.length < maxHighlights; i++) {
 		let text = (highlights[i].ttsText || "").trim();
 		if (!text) continue;
 		if (!/[.!?]$/.test(text)) text += ".";
@@ -152,7 +159,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	const walkthrough = new Walkthrough();
 	const sidebar = new SidebarProvider(context.extensionUri);
-	const server = new ExplainerServer(walkthrough);
+	const server = new ExplainerServer(walkthrough, EDITOR_ID);
 
 	let storage: WalkthroughStorage | undefined;
 	if (wsFolder) {
@@ -192,12 +199,15 @@ export function activate(context: vscode.ExtensionContext): void {
 	let pendingHighlightStart: number | undefined;
 	// True when audio was suspended (not stopped) during pause — allows exact-position resume
 	let hasSuspendedAudio = false;
+	// True when the current step's narration finished and we wait for Next/Prev (autoAdvance off)
+	let awaitingNext = false;
 
 	/** Stop audio and reset suspended flag. Use this instead of sidebar.sendAudioStop() directly. */
 	function fullAudioStop(): void {
 		sidebar.sendAudioStop();
 		sidebar.setChunkPlayedCallback(undefined);
 		hasSuspendedAudio = false;
+		awaitingNext = false;
 	}
 
 	/**
@@ -242,6 +252,8 @@ export function activate(context: vscode.ExtensionContext): void {
 		startFromHighlight = 0,
 	): Promise<void> {
 		const myGeneration = ++highlightLoopGeneration;
+		awaitingNext = false;
+		const autoAdvance = autoAdvanceEnabled();
 
 		const highlights = segment.highlights;
 
@@ -258,7 +270,8 @@ export function activate(context: vscode.ExtensionContext): void {
 		// ── Continuous TTS path: one call per segment ──
 		const hasTTS = isTTSAvailable() && highlights.some((h) => h.ttsText);
 		if (hasTTS) {
-			const plan = buildSegmentTTSPlan(highlights, startFromHighlight);
+			// Without auto-advance, narrate only the current step.
+			const plan = buildSegmentTTSPlan(highlights, startFromHighlight, autoAdvance ? Infinity : 1);
 			if (plan.fullText && plan.chunkBoundaries.length > 0) {
 				// Show first highlight immediately
 				const firstHighlightIdx = plan.highlightIndices[0] ?? startFromHighlight;
@@ -314,6 +327,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
 				if (myGeneration !== highlightLoopGeneration) return;
 
+				if (!autoAdvance) {
+					// Step narrated — wait for the user to press Next/Prev.
+					awaitingNext = true;
+					return;
+				}
+
 				// All highlights done — auto-advance to next segment
 				if (wt.getState().status === "playing") {
 					wt.next();
@@ -343,12 +362,71 @@ export function activate(context: vscode.ExtensionContext): void {
 			currentChunkAbort = undefined;
 
 			if (myGeneration !== highlightLoopGeneration) return;
+			if (!autoAdvance) break; // narrate only the current step
+		}
+
+		if (!autoAdvance) {
+			if (myGeneration === highlightLoopGeneration) awaitingNext = true;
+			return;
 		}
 
 		// All highlights done — auto-advance to next segment
 		if (myGeneration === highlightLoopGeneration && wt.getState().status === "playing") {
 			wt.next();
 		}
+	}
+
+	/** Show (and, while playing, narrate) highlight `idx` of the current segment. */
+	function goToHighlight(seg: Segment, idx: number): void {
+		highlightLoopGeneration++;
+		if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
+		fullAudioStop();
+		walkthrough.setHighlightIndex(idx);
+		if (walkthrough.getState().status === "playing") {
+			playSegmentHighlights(seg, walkthrough, sidebar, idx).catch((err) => {
+				console.error("[code-explainer] Highlight loop error:", err);
+			});
+		} else {
+			sidebar.sendHighlightAdvance(idx, seg.highlights.length, seg.highlights[idx].explanation);
+			highlightSubRange(seg.file, seg.highlights[idx].start, seg.highlights[idx].end, seg.highlights).catch(() => {});
+		}
+	}
+
+	/** Next step: next highlight, or the first highlight of the next segment. */
+	function stepNext(): void {
+		const seg = walkthrough.getCurrentSegment();
+		if (!seg) return;
+		const count = seg.highlights?.length ?? 0;
+		const curIdx = walkthrough.getHighlightIndex();
+		if (count > 0 && curIdx < count - 1) {
+			goToHighlight(seg, curIdx + 1);
+			return;
+		}
+		const state = walkthrough.getState();
+		if (state.currentIndex + 1 >= state.segments.length) return; // At walkthrough end
+		if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
+		fullAudioStop();
+		walkthrough.next(); // emits "segment" → starts from highlight 0
+	}
+
+	/** Previous step: previous highlight, or the last highlight of the previous segment. */
+	function stepPrev(): void {
+		const seg = walkthrough.getCurrentSegment();
+		if (!seg) return;
+		const count = seg.highlights?.length ?? 0;
+		const curIdx = walkthrough.getHighlightIndex();
+		if (count > 0 && curIdx > 0) {
+			goToHighlight(seg, curIdx - 1);
+			return;
+		}
+		const state = walkthrough.getState();
+		const prevSegIdx = state.currentIndex - 1;
+		if (prevSegIdx < 0) return; // Already at the very first segment
+		const prevHighlightCount = state.segments[prevSegIdx]?.highlights?.length ?? 0;
+		if (prevHighlightCount > 0) pendingHighlightStart = prevHighlightCount - 1;
+		if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
+		fullAudioStop();
+		walkthrough.prev(); // emits "segment" → pendingHighlightStart used
 	}
 
 	walkthrough.on("segment", (segment: Segment) => {
@@ -387,11 +465,14 @@ export function activate(context: vscode.ExtensionContext): void {
 				currentChunkAbort = undefined;
 			}
 			if (state.status === "paused") {
-				// Suspend audio but keep the highlight loop alive — don't
-				// increment highlightLoopGeneration so the chunkPlayedCallback
-				// remains valid and can advance highlights when audio resumes.
-				sidebar.sendAudioSuspend();
-				hasSuspendedAudio = true;
+				if (!awaitingNext) {
+					// Suspend audio but keep the highlight loop alive — don't
+					// increment highlightLoopGeneration so the chunkPlayedCallback
+					// remains valid and can advance highlights when audio resumes.
+					// (If the step already finished, Play replays it instead.)
+					sidebar.sendAudioSuspend();
+					hasSuspendedAudio = true;
+				}
 			} else {
 				highlightLoopGeneration++;
 			}
@@ -420,46 +501,8 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 			}
 		}),
-		vscode.commands.registerCommand('codeExplainer.next', () => {
-			const seg = walkthrough.getCurrentSegment();
-			if (seg?.highlights && seg.highlights.length > 0) {
-				const curIdx = walkthrough.getHighlightIndex();
-				if (curIdx >= seg.highlights.length - 1) return;
-				const nextIdx = curIdx + 1;
-				highlightLoopGeneration++;
-				if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
-				fullAudioStop();
-				walkthrough.setHighlightIndex(nextIdx);
-				if (walkthrough.getState().status === "playing") {
-					playSegmentHighlights(seg, walkthrough, sidebar, nextIdx).catch((err) => {
-						console.error("[code-explainer] Highlight loop error:", err);
-					});
-				} else {
-					sidebar.sendHighlightAdvance(nextIdx, seg.highlights.length);
-					highlightSubRange(seg.file, seg.highlights[nextIdx].start, seg.highlights[nextIdx].end).catch(() => {});
-				}
-			}
-		}),
-		vscode.commands.registerCommand('codeExplainer.prev', () => {
-			const seg = walkthrough.getCurrentSegment();
-			if (seg?.highlights && seg.highlights.length > 0) {
-				const curIdx = walkthrough.getHighlightIndex();
-				if (curIdx <= 0) return;
-				const prevIdx = curIdx - 1;
-				highlightLoopGeneration++;
-				if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
-				fullAudioStop();
-				walkthrough.setHighlightIndex(prevIdx);
-				if (walkthrough.getState().status === "playing") {
-					playSegmentHighlights(seg, walkthrough, sidebar, prevIdx).catch((err) => {
-						console.error("[code-explainer] Highlight loop error:", err);
-					});
-				} else {
-					sidebar.sendHighlightAdvance(prevIdx, seg.highlights.length);
-					highlightSubRange(seg.file, seg.highlights[prevIdx].start, seg.highlights[prevIdx].end).catch(() => {});
-				}
-			}
-		}),
+		vscode.commands.registerCommand('codeExplainer.next', () => stepNext()),
+		vscode.commands.registerCommand('codeExplainer.prev', () => stepPrev()),
 		vscode.commands.registerCommand('codeExplainer.nextSegment', () => {
 			if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
 			fullAudioStop();
@@ -597,70 +640,12 @@ export function activate(context: vscode.ExtensionContext): void {
 					}
 				}
 				break;
-			case "next_highlight": {
-				const seg = walkthrough.getCurrentSegment();
-				if (seg?.highlights && seg.highlights.length > 0) {
-					const curIdx = walkthrough.getHighlightIndex();
-					if (curIdx >= seg.highlights.length - 1) {
-						// At last sub-segment — advance to next segment's first highlight
-						const nextSegIdx = walkthrough.getState().currentIndex + 1;
-						if (nextSegIdx >= walkthrough.getState().segments.length) break; // At walkthrough end
-						if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
-								fullAudioStop();
-						walkthrough.next(); // emits "segment" → starts from highlight 0
-						break;
-					}
-					const nextIdx = curIdx + 1;
-					highlightLoopGeneration++;
-					if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
-					fullAudioStop();
-					walkthrough.setHighlightIndex(nextIdx);
-					if (walkthrough.getState().status === "playing") {
-						playSegmentHighlights(seg, walkthrough, sidebar, nextIdx).catch((err) => {
-							console.error("[code-explainer] Highlight loop error:", err);
-						});
-					} else {
-						sidebar.sendHighlightAdvance(nextIdx, seg.highlights.length, seg.highlights[nextIdx].explanation);
-						highlightSubRange(seg.file, seg.highlights[nextIdx].start, seg.highlights[nextIdx].end, seg.highlights).catch(() => {});
-					}
-				}
+			case "next_highlight":
+				stepNext();
 				break;
-			}
-			case "prev_highlight": {
-				const seg = walkthrough.getCurrentSegment();
-				if (seg?.highlights && seg.highlights.length > 0) {
-					const curIdx = walkthrough.getHighlightIndex();
-					if (curIdx <= 0) {
-						// At first sub-segment — go to previous segment's last highlight
-						const wtState = walkthrough.getState();
-						const prevSegIdx = wtState.currentIndex - 1;
-						if (prevSegIdx < 0) break; // Already at the very first segment
-						const prevSeg = wtState.segments[prevSegIdx];
-						const prevHighlightCount = prevSeg?.highlights?.length ?? 0;
-						if (prevHighlightCount > 0) {
-							pendingHighlightStart = prevHighlightCount - 1;
-						}
-						if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
-								fullAudioStop();
-						walkthrough.prev(); // emits "segment" → pendingHighlightStart used
-						break;
-					}
-					const prevIdx = curIdx - 1;
-					highlightLoopGeneration++;
-					if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
-					fullAudioStop();
-					walkthrough.setHighlightIndex(prevIdx);
-					if (walkthrough.getState().status === "playing") {
-						playSegmentHighlights(seg, walkthrough, sidebar, prevIdx).catch((err) => {
-							console.error("[code-explainer] Highlight loop error:", err);
-						});
-					} else {
-						sidebar.sendHighlightAdvance(prevIdx, seg.highlights.length, seg.highlights[prevIdx].explanation);
-						highlightSubRange(seg.file, seg.highlights[prevIdx].start, seg.highlights[prevIdx].end, seg.highlights).catch(() => {});
-					}
-				}
+			case "prev_highlight":
+				stepPrev();
 				break;
-			}
 			case "next":
 				if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
 				fullAudioStop();

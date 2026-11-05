@@ -8,5 +8,9 @@ node_modules/
 out/
 *.vsix
 
+# TTS model files (downloaded by setup.ps1)
+models/
+
 # OS
 .DS_Store
+editor.txt

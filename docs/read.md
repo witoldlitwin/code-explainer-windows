@@ -7,13 +7,13 @@ For each segment:
 ## 5a. Highlight in VS Code (if available)
 
 Sidebar active (from step 0):
-```bash
-~/.claude/skills/explainer/scripts/explainer.sh send '{"type": "goto", "segmentId": {id}}'
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\skills\explainer\scripts\explainer.ps1" send '{"type": "goto", "segmentId": {id}}'
 ```
 
 Fallback (no sidebar):
-```bash
-echo '{"file":"{absolute_filepath}","start":{start},"end":{end}}' > ~/.claude-highlight.json
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\skills\explainer\scripts\explainer.ps1" highlight "{absolute_filepath}" {start} {end}
 ```
 
 Always use absolute file paths.
