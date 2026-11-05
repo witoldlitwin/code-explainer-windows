@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import type { ToWebviewMessage, FromWebviewMessage } from "./types";
+import type { ToWebviewMessage, FromWebviewMessage, SentenceCue } from "./types";
 import type { WalkthroughState } from "./walkthrough";
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -9,6 +9,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 	private onMessage?: (msg: FromWebviewMessage) => void | Promise<void>;
 	private playbackCompleteResolve?: () => void;
 	private chunkPlayedCallback?: () => void;
+	private staleSegments: number[] = [];
 
 	constructor(private readonly extensionUri: vscode.Uri) {}
 
@@ -67,15 +68,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			segments: state.segments,
 			currentSegment: state.segments[state.currentIndex]?.id ?? -1,
 			status: state.status,
+			staleSegments: this.staleSegments,
 		});
 	}
 
+	/** Segment ids whose code changed since recording; sent with every state update. */
+	setStaleSegments(ids: number[]): void {
+		this.staleSegments = ids;
+	}
+
 	/** Send audio chunk to webview */
-	sendAudioChunk(base64Data: string, sampleRate: number): void {
+	sendAudioChunk(base64Data: string, sampleRate: number, cue?: SentenceCue): void {
 		this.postMessage({
 			type: "audio_chunk",
 			data: base64Data,
 			sampleRate,
+			cue,
 		});
 	}
 
@@ -161,8 +169,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			<p class="idle-text">No walkthrough loaded</p>
 			<p class="idle-hint">Run <code>/explainer</code> in your coding agent to generate one</p>
 		</div>
+		<div id="history-section" style="display:none;">
+			<h3 class="saved-list-title">Recent Walkthroughs</h3>
+			<ul id="history-list"></ul>
+		</div>
 		<div id="saved-list-section" style="display:none;">
-			<h3 class="saved-list-title">Saved Walkthroughs</h3>
+			<h3 class="saved-list-title">Shared in Repo</h3>
 			<ul id="saved-list"></ul>
 		</div>
 	</div>
@@ -172,7 +184,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			<div class="header">
 				<span class="header-label">CODE EXPLAINER</span>
 				<div class="header-actions">
-					<button id="btn-save" class="icon-btn" title="Save Walkthrough">
+					<button id="btn-history" class="icon-btn" title="Previous Walkthroughs">
+						<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+							<path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 12.5a5.5 5.5 0 110-11 5.5 5.5 0 010 11zM8.75 4h-1.5v4.31l3.22 2.15.83-1.25-2.55-1.7V4z"/>
+						</svg>
+					</button>
+					<button id="btn-save" class="icon-btn" title="Share in Repo (save to .walkthroughs/)">
 						<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
 							<path d="M13.354 4.354l-3.708-3.708A.5.5 0 009.293.5H2.5A1.5 1.5 0 001 2v12a1.5 1.5 0 001.5 1.5h11A1.5 1.5 0 0015 14V4.707a.5.5 0 00-.146-.353zM12 14H4V9h8v5zm1-7H3V2h6.293L13 5.707V7z"/>
 						</svg>
@@ -236,6 +253,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 					</select>
 				</label>
 			</div>
+
+			<div id="narration" class="narration-box"></div>
 
 			<div class="explanation-box">
 				<div id="explanation-text" class="explanation-text"></div>

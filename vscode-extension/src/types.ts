@@ -92,12 +92,21 @@ export interface WebviewUpdateMessage {
 	segments: Segment[];
 	currentSegment: number;
 	status: WalkthroughStatus;
+	/** Segment ids whose code changed since the walkthrough was recorded. */
+	staleSegments?: number[];
 }
 
 export interface WebviewAudioChunkMessage {
 	type: "audio_chunk";
 	data: string; // base64-encoded float32 PCM
 	sampleRate: number;
+	/** Which highlight's narration, and which sentence of it, this chunk speaks. */
+	cue?: SentenceCue;
+}
+
+export interface SentenceCue {
+	highlightIndex: number;
+	sentenceIndex: number;
 }
 
 export interface WebviewAudioEndMessage {
@@ -133,8 +142,14 @@ export interface WebviewSavedListMessage {
 	walkthroughs: Array<{ name: string; title: string }>;
 }
 
+export interface WebviewHistoryListMessage {
+	type: "history_list";
+	entries: Array<{ id: string; title: string; updatedAt: string; segmentCount: number }>;
+}
+
 export type ToWebviewMessage =
 	| WebviewUpdateMessage
+	| WebviewHistoryListMessage
 	| WebviewAudioChunkMessage
 	| WebviewAudioEndMessage
 	| WebviewAudioStopMessage
@@ -217,7 +232,24 @@ export interface WebviewCloseWalkthroughMessage {
 	type: "close_walkthrough";
 }
 
+export interface WebviewOpenHistoryMessage {
+	type: "open_history";
+	id: string;
+}
+
+export interface WebviewDeleteHistoryMessage {
+	type: "delete_history";
+	id: string;
+}
+
+export interface WebviewShowHistoryMessage {
+	type: "show_history";
+}
+
 export type FromWebviewMessage =
+	| WebviewOpenHistoryMessage
+	| WebviewDeleteHistoryMessage
+	| WebviewShowHistoryMessage
 	| WebviewPlayPauseMessage
 	| WebviewNextMessage
 	| WebviewPrevMessage

@@ -347,6 +347,52 @@ body {
 
 /* ── Explanation ── */
 
+/* ── Narration (full spoken text of the segment; current sentence highlighted) ── */
+
+.narration-box {
+	position: relative; /* offsetTop of children is measured from here */
+	background: var(--vscode-editor-background);
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 6px;
+	padding: 8px 10px;
+	margin-bottom: 10px;
+	max-height: 240px;
+	overflow-y: auto;
+	font-size: 0.95em;
+	line-height: 1.5;
+}
+
+.narration-box:empty {
+	display: none;
+}
+
+.narration-step {
+	margin: 0 0 8px;
+	padding-left: 8px;
+	border-left: 2px solid transparent;
+	opacity: 0.6;
+	transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+
+.narration-step:last-child {
+	margin-bottom: 0;
+}
+
+.narration-step.current {
+	opacity: 1;
+	border-left-color: var(--vscode-focusBorder);
+}
+
+.narration-sentence {
+	border-radius: 3px;
+	transition: background-color 0.15s ease;
+}
+
+.narration-sentence.active {
+	background: var(--vscode-editor-findMatchHighlightBackground, rgba(255, 200, 0, 0.25));
+	color: var(--vscode-editor-foreground);
+}
+
 .explanation-box {
 	background: var(--vscode-editor-background);
 	border: 1px solid var(--vscode-panel-border);
@@ -530,8 +576,64 @@ body {
 	opacity: 0.5;
 }
 
-#saved-list {
+#saved-list,
+#history-list {
 	list-style: none;
+}
+
+#history-section,
+#saved-list-section {
+	margin-top: 16px;
+}
+
+/* History rows: title + meta line, delete button on the right */
+.history-item {
+	padding-top: 6px;
+	padding-bottom: 6px;
+}
+
+.history-item:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.history-info {
+	flex: 1;
+	min-width: 0;
+}
+
+.history-title {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.history-meta {
+	font-size: 0.85em;
+	opacity: 0.6;
+	margin-top: 1px;
+}
+
+/* Transparent (not hidden) so it stays reachable with Tab */
+.history-item .history-delete {
+	flex-shrink: 0;
+	opacity: 0;
+}
+
+.history-item:hover .history-delete,
+.history-item:focus-within .history-delete {
+	opacity: 0.6;
+}
+
+.history-item .history-delete:hover,
+.history-item .history-delete:focus-visible {
+	opacity: 1;
+}
+
+/* Segment whose code changed since the walkthrough was recorded */
+.stale::after {
+	content: " \26A0";
+	color: var(--vscode-editorWarning-foreground, #cca700);
 }
 
 .saved-item {

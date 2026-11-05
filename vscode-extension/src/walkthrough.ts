@@ -38,6 +38,8 @@ export class Walkthrough extends EventEmitter {
 
 	setPlan(title: string, segments: Segment[]): void {
 		this.state = { title, segments, currentIndex: 0, currentHighlightIndex: 0, status: "paused" };
+		// A brand-new plan (as opposed to the incremental edits that also emit "plan")
+		this.emit("newPlan", this.getState());
 		this.emit("plan", this.getState());
 		this.emit("status", this.state.status);
 		// Show the first segment (code location) without starting playback

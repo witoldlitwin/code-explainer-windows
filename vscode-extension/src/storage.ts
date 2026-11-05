@@ -7,6 +7,16 @@ export interface WalkthroughFile {
 	segments: Segment[];
 }
 
+/** Convert absolute segment `file` paths to paths relative to the workspace root. */
+export function toRelativePaths(workspaceRoot: string, segments: Segment[]): Segment[] {
+	return segments.map((s) => ({ ...s, file: path.relative(workspaceRoot, s.file) }));
+}
+
+/** Convert relative segment `file` paths to absolute paths under the workspace root. */
+export function toAbsolutePaths(workspaceRoot: string, segments: Segment[]): Segment[] {
+	return segments.map((s) => ({ ...s, file: path.resolve(workspaceRoot, s.file) }));
+}
+
 export class WalkthroughStorage {
 	private readonly walkthroughsDir: string;
 
@@ -23,20 +33,12 @@ export class WalkthroughStorage {
 			|| "walkthrough";
 	}
 
-	/** Convert absolute `file` paths to relative (from workspace root). */
 	private toRelativePaths(segments: Segment[]): Segment[] {
-		return segments.map((s) => ({
-			...s,
-			file: path.relative(this.workspaceRoot, s.file),
-		}));
+		return toRelativePaths(this.workspaceRoot, segments);
 	}
 
-	/** Convert relative `file` paths to absolute (from workspace root). */
 	private toAbsolutePaths(segments: Segment[]): Segment[] {
-		return segments.map((s) => ({
-			...s,
-			file: path.resolve(this.workspaceRoot, s.file),
-		}));
+		return toAbsolutePaths(this.workspaceRoot, segments);
 	}
 
 	/**

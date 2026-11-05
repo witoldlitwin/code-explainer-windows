@@ -87,8 +87,9 @@ def load_tts():
     return kokoro
 
 
-# Must match SPLIT_RE in vscode-extension/src/extension.ts: the extension counts
-# one audio chunk per sentence to advance highlights in sync with playback.
+# Must match SENTENCE_SPLIT_RE in vscode-extension/src/tts-bridge.ts: the extension
+# counts one audio chunk per sentence to advance highlights in sync with playback
+# and to highlight each sentence in the sidebar while its chunk plays.
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 SENTENCE_PAUSE_S = 0.25
 

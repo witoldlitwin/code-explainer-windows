@@ -6,8 +6,9 @@ import { Walkthrough } from "./walkthrough";
 import { ExplainerServer } from "./server";
 import { SidebarProvider } from "./sidebar";
 import { WalkthroughStorage } from "./storage";
+import { WalkthroughHistory, hashSegment, relativeDate, type SegmentHashes } from "./history";
 import { highlightRange, highlightSegmentRange, highlightSubRange, clearHighlights, disposeHighlights, enableSmoothScrolling, restoreSmoothScrolling } from "./highlight";
-import { streamTTS, isTTSAvailable, ensureServer, setWorkspaceRoot } from "./tts-bridge";
+import { streamTTS, isTTSAvailable, ensureServer, setWorkspaceRoot, splitSentences } from "./tts-bridge";
 import type { AgentMessage, FromWebviewMessage, Segment, Highlight } from "./types";
 
 // ── File-watcher fallback (backward compat) ──
@@ -83,7 +84,6 @@ function autoAdvanceEnabled(): boolean {
 }
 
 function buildSegmentTTSPlan(highlights: Highlight[], startFrom = 0, maxHighlights = Infinity): SegmentTTSPlan {
-	const SPLIT_RE = /(?<=[.!?])\s+/;
 	const chunkBoundaries: number[] = [];
 	const highlightIndices: number[] = [];
 	const textParts: string[] = [];
@@ -95,11 +95,21 @@ function buildSegmentTTSPlan(highlights: Highlight[], startFrom = 0, maxHighligh
 		if (!/[.!?]$/.test(text)) text += ".";
 		chunkBoundaries.push(totalChunks);
 		highlightIndices.push(i);
-		totalChunks += text.split(SPLIT_RE).filter(Boolean).length;
+		totalChunks += splitSentences(text).length;
 		textParts.push(text);
 	}
 
 	return { fullText: textParts.join(" "), chunkBoundaries, highlightIndices, totalChunks };
+}
+
+/** Map a chunk of the plan's stream to its highlight and its sentence within that highlight. */
+function chunkLocation(plan: SegmentTTSPlan, chunkIndex: number): { highlightIndex: number; sentenceIndex: number } | undefined {
+	for (let p = plan.chunkBoundaries.length - 1; p >= 0; p--) {
+		if (plan.chunkBoundaries[p] <= chunkIndex) {
+			return { highlightIndex: plan.highlightIndices[p], sentenceIndex: chunkIndex - plan.chunkBoundaries[p] };
+		}
+	}
+	return undefined;
 }
 
 // ── Main activation ──
@@ -126,8 +136,10 @@ function playHighlightChunk(
 			abortFn = streamTTS(
 				highlight.ttsText,
 				{ voice, speed },
-				(base64, sampleRate) => {
-					if (!aborted) sidebar.sendAudioChunk(base64, sampleRate);
+				(base64, sampleRate, chunkIndex) => {
+					if (!aborted) {
+						sidebar.sendAudioChunk(base64, sampleRate, { highlightIndex, sentenceIndex: chunkIndex });
+					}
 				},
 				() => {
 					if (!aborted) sidebar.sendAudioEnd();
@@ -166,6 +178,10 @@ export function activate(context: vscode.ExtensionContext): void {
 		storage = new WalkthroughStorage(wsFolder);
 		server.setStorage(storage);
 	}
+	// Private auto-saved history (VS Code workspace storage, outside the repo)
+	const history = wsFolder && context.storageUri
+		? new WalkthroughHistory(context.storageUri.fsPath, wsFolder)
+		: undefined;
 
 	// Register sidebar
 	context.subscriptions.push(
@@ -190,7 +206,6 @@ export function activate(context: vscode.ExtensionContext): void {
 	// TTS settings — updated by webview messages
 	let ttsVoice = "af_heart";
 	let ttsSpeed = 1;
-	let walkthroughSaved = false;
 
 	let currentChunkAbort: (() => void) | undefined;
 	let highlightLoopGeneration = 0;
@@ -307,9 +322,9 @@ export function activate(context: vscode.ExtensionContext): void {
 				const abortTTS = streamTTS(
 					plan.fullText,
 					{ voice: ttsVoice, speed: ttsSpeed },
-					(base64, sampleRate) => {
+					(base64, sampleRate, chunkIndex) => {
 						if (myGeneration !== highlightLoopGeneration) return;
-						sb.sendAudioChunk(base64, sampleRate);
+						sb.sendAudioChunk(base64, sampleRate, chunkLocation(plan, chunkIndex));
 					},
 					() => {
 						if (myGeneration !== highlightLoopGeneration) return;
@@ -448,7 +463,195 @@ export function activate(context: vscode.ExtensionContext): void {
 		});
 	});
 
+	// ── History auto-save ──
+
+	/** Where the next brand-new plan comes from; consumed by the "newPlan" handler. */
+	let nextPlanSource: "agent" | "history" | undefined;
+	let currentHistoryId: string | undefined;
+	/** Recorded hash per segment id, plus the range it was taken from (to detect replaced segments). */
+	const segmentHashes = new Map<number, { range: string; hash: string | null }>();
+	let staleSegments = new Set<number>();
+	let historySaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+	const rangeKey = (s: Segment) => `${s.file}:${s.start}-${s.end}`;
+
+	function setStale(ids: Set<number>): void {
+		staleSegments = ids;
+		sidebar.setStaleSegments([...ids]);
+	}
+
+	/** Hash segments that are new or whose range changed; returns the hashes of the current plan. */
+	async function refreshHashes(segments: Segment[]): Promise<SegmentHashes> {
+		const result: SegmentHashes = {};
+		for (const seg of segments) {
+			const known = segmentHashes.get(seg.id);
+			if (!known || known.range !== rangeKey(seg)) {
+				const hash = await hashSegment(seg);
+				segmentHashes.set(seg.id, { range: rangeKey(seg), hash });
+				if (staleSegments.has(seg.id)) {
+					const next = new Set(staleSegments);
+					next.delete(seg.id);
+					setStale(next);
+				}
+			}
+			result[seg.id] = segmentHashes.get(seg.id)!.hash;
+		}
+		return result;
+	}
+
+	function scheduleHistorySave(): void {
+		if (!history || !currentHistoryId) return;
+		if (historySaveTimer) clearTimeout(historySaveTimer);
+		historySaveTimer = setTimeout(async () => {
+			historySaveTimer = undefined;
+			const id = currentHistoryId;
+			if (!id) return;
+			const state = walkthrough.getState();
+			if (state.segments.length === 0) return;
+			try {
+				const hashes = await refreshHashes(state.segments);
+				await history.update(id, state.title, state.segments, hashes);
+			} catch (err) {
+				console.error("[code-explainer] History update failed:", err);
+			}
+		}, 300);
+	}
+
+	walkthrough.on("newPlan", () => {
+		const source = nextPlanSource;
+		nextPlanSource = undefined;
+		if (source === "history") return; // openFromHistory already set id, hashes and stale set
+		currentHistoryId = undefined;
+		segmentHashes.clear();
+		setStale(new Set());
+		if (source !== "agent" || !history) return; // e.g. loaded from .walkthroughs/
+		const state = walkthrough.getState();
+		refreshHashes(state.segments)
+			.then((hashes) => history.create(state.title, state.segments, hashes))
+			.then((id) => {
+				currentHistoryId = id;
+				scheduleHistorySave(); // catch agent edits that arrived while creating
+			})
+			.catch((err) => console.error("[code-explainer] History save failed:", err));
+	});
+
+	async function openFromHistory(id: string): Promise<void> {
+		if (!history) return;
+		const data = await history.load(id);
+		if (!data) {
+			vscode.window.showErrorMessage("That walkthrough could not be loaded (the history file is missing or damaged).");
+			await sendHistoryList();
+			return;
+		}
+		if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
+		fullAudioStop();
+		segmentHashes.clear();
+		const stale = new Set<number>();
+		for (const seg of data.segments) {
+			const recorded = data.hashes[seg.id];
+			segmentHashes.set(seg.id, { range: rangeKey(seg), hash: recorded ?? null });
+			const current = await hashSegment(seg);
+			if (recorded === undefined || recorded === null || current !== recorded) stale.add(seg.id);
+		}
+		currentHistoryId = id;
+		setStale(stale);
+		nextPlanSource = "history";
+		walkthrough.setPlan(data.title, data.segments);
+		sidebar.reveal();
+		await history.touch(id);
+	}
+
+	async function sendHistoryList(): Promise<void> {
+		sidebar.postMessage({ type: "history_list", entries: history ? await history.list() : [] });
+	}
+
+	/** Ask for confirmation, then delete a history entry. Returns true if deleted. */
+	async function deleteFromHistory(id: string): Promise<boolean> {
+		if (!history) return false;
+		const title = (await history.getTitle(id)) ?? "this walkthrough";
+		const choice = await vscode.window.showWarningMessage(
+			`Delete "${title}" from history?`,
+			{ modal: true },
+			"Delete",
+		);
+		if (choice !== "Delete") return false;
+		await history.delete(id);
+		if (currentHistoryId === id) currentHistoryId = undefined;
+		await sendHistoryList();
+		return true;
+	}
+
+	/** Quick pick listing history entries (deletable) and shared .walkthroughs/ entries. */
+	async function showWalkthroughPicker(): Promise<void> {
+		type Item = vscode.QuickPickItem & { historyId?: string; sharedName?: string };
+		const trash: vscode.QuickInputButton = { iconPath: new vscode.ThemeIcon("trash"), tooltip: "Delete from history" };
+
+		const buildItems = async (): Promise<Item[]> => {
+			const items: Item[] = [];
+			const entries = history ? await history.list() : [];
+			if (entries.length > 0) {
+				items.push({ label: "Recent", kind: vscode.QuickPickItemKind.Separator });
+				for (const e of entries) {
+					items.push({
+						label: e.title,
+						description: `${relativeDate(e.updatedAt)} · ${e.segmentCount} segment${e.segmentCount === 1 ? "" : "s"}`,
+						historyId: e.id,
+						buttons: [trash],
+					});
+				}
+			}
+			const shared = storage ? await storage.list() : [];
+			if (shared.length > 0) {
+				items.push({ label: "Shared in repo (.walkthroughs/)", kind: vscode.QuickPickItemKind.Separator });
+				for (const s of shared) items.push({ label: s.title, description: s.name, sharedName: s.name });
+			}
+			return items;
+		};
+
+		const items = await buildItems();
+		if (items.length === 0) {
+			vscode.window.showInformationMessage("No previous walkthroughs yet. Run /explainer in your coding agent to create one.");
+			return;
+		}
+		const qp = vscode.window.createQuickPick<Item>();
+		qp.placeholder = "Open a previous walkthrough";
+		qp.matchOnDescription = true;
+		qp.items = items;
+		qp.onDidTriggerItemButton(async (e) => {
+			if (!e.item.historyId) return;
+			qp.ignoreFocusOut = true; // keep the picker open while the modal confirm shows
+			const deleted = await deleteFromHistory(e.item.historyId);
+			qp.ignoreFocusOut = false;
+			if (deleted) {
+				qp.items = await buildItems();
+				if (qp.items.length === 0) qp.hide();
+			}
+			qp.show();
+		});
+		qp.onDidAccept(async () => {
+			const pick = qp.selectedItems[0];
+			qp.hide();
+			if (!pick) return;
+			if (pick.historyId) {
+				await openFromHistory(pick.historyId);
+			} else if (pick.sharedName && storage) {
+				const data = await storage.load(pick.sharedName);
+				if (!data) {
+					vscode.window.showErrorMessage("Failed to load walkthrough");
+					return;
+				}
+				if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
+				fullAudioStop();
+				walkthrough.setPlan(data.title, data.segments);
+				sidebar.reveal();
+			}
+		});
+		qp.onDidHide(() => qp.dispose());
+		qp.show();
+	}
+
 	walkthrough.on("plan", () => {
+		scheduleHistorySave();
 		sidebar.updateState(walkthrough.getState());
 		server.broadcastState();
 		vscode.commands.executeCommand('setContext', 'codeExplainer.walkthroughActive', true);
@@ -556,34 +759,14 @@ export function activate(context: vscode.ExtensionContext): void {
 				if (overwrite !== "Overwrite") return;
 			}
 			await storage.save(state.title, state.segments, name);
-			walkthroughSaved = true;
 			vscode.window.showInformationMessage(`Walkthrough saved to .walkthroughs/${name}.json`);
 		}),
 		vscode.commands.registerCommand('codeExplainer.loadWalkthrough', async () => {
-			if (!storage) {
+			if (!storage && !history) {
 				vscode.window.showErrorMessage("No workspace folder open");
 				return;
 			}
-			const items = await storage.list();
-			if (items.length === 0) {
-				vscode.window.showInformationMessage("No saved walkthroughs found in .walkthroughs/");
-				return;
-			}
-			const pick = await vscode.window.showQuickPick(
-				items.map((item) => ({
-					label: item.title,
-					description: item.name,
-				})),
-				{ placeHolder: "Select a walkthrough to load" }
-			);
-			if (!pick) return;
-			const data = await storage.load(pick.description!);
-			if (!data) {
-				vscode.window.showErrorMessage("Failed to load walkthrough");
-				return;
-			}
-			walkthrough.setPlan(data.title, data.segments);
-			sidebar.reveal();
+			await showWalkthroughPicker();
 		}),
 	);
 
@@ -592,7 +775,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	server.setMessageHandler((msg: AgentMessage) => {
 		switch (msg.type) {
 			case "set_plan":
-				walkthroughSaved = false;
+				nextPlanSource = "agent";
 				walkthrough.setPlan(msg.title, msg.segments);
 				sidebar.reveal();
 				break;
@@ -689,13 +872,13 @@ export function activate(context: vscode.ExtensionContext): void {
 				if (storage) {
 					const data = await storage.load(msg.name);
 					if (data) {
-						walkthroughSaved = true;
 						walkthrough.setPlan(data.title, data.segments);
 						sidebar.reveal();
 					}
 				}
 				break;
 			case "request_saved_list":
+				await sendHistoryList();
 				if (storage) {
 					const list = await storage.list();
 					sidebar.postMessage({
@@ -704,26 +887,21 @@ export function activate(context: vscode.ExtensionContext): void {
 					});
 				}
 				break;
-			case "close_walkthrough": {
-				const wtState = walkthrough.getState();
-				if (wtState.status !== "idle" && wtState.status !== "stopped" && !walkthroughSaved) {
-					const choice = await vscode.window.showWarningMessage(
-						"This walkthrough hasn't been saved. Close anyway?",
-						{ modal: true, detail: "You can re-generate it by asking your coding agent to send the walkthrough again." },
-						"Save & Close",
-						"Close Without Saving",
-					);
-					if (!choice) break; // dismissed
-					if (choice === "Save & Close") {
-						await vscode.commands.executeCommand('codeExplainer.saveWalkthrough');
-					}
-				}
+			case "open_history":
+				await openFromHistory(msg.id);
+				break;
+			case "delete_history":
+				await deleteFromHistory(msg.id);
+				break;
+			case "show_history":
+				await showWalkthroughPicker();
+				break;
+			case "close_walkthrough":
+				// Walkthroughs are auto-saved to history, so closing needs no confirmation.
 				if (currentChunkAbort) { currentChunkAbort(); currentChunkAbort = undefined; }
 				fullAudioStop();
 				walkthrough.stop();
-				walkthroughSaved = false;
 				break;
-			}
 		}
 	});
 

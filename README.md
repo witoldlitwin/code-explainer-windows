@@ -168,8 +168,15 @@ The VS Code sidebar provides buttons for all walkthrough controls:
 - 🗣️ **Voice** — Select TTS voice
 - 🔇 **Mute / Unmute** — Toggle voice narration
 - 🔄 **Restart** — Restart walkthrough from the beginning
-- 💾 **Save** — Save current walkthrough to `.walkthroughs/` for later replay
-- ✕ **Close** — Close walkthrough (prompts to save if unsaved)
+- 🕘 **History** — Open a previous walkthrough (or delete one) without closing the current one
+- 💾 **Save** — Save current walkthrough to `.walkthroughs/` to share it via the repo
+- ✕ **Close** — Close walkthrough (it stays in history)
+
+### 🕘 History
+
+Every walkthrough your agent sends is saved automatically to a private, per-workspace history (VS Code workspace storage, outside the repo). Reopen one from the **Recent Walkthroughs** list in the empty sidebar, the 🕘 button in the sidebar header, or **Code Explainer: Open Previous Walkthrough**. Nothing is regenerated; only the narration audio is synthesized again locally. Each entry has a delete button.
+
+When a walkthrough is reopened after the code changed, the affected segments are marked with ⚠ in the outline, because their highlighted lines may no longer match.
 
 ### 💾 Save & Share
 
@@ -188,9 +195,9 @@ Save walkthroughs as portable JSON files that live in your repo:
 
 Or use the VS Code command palette:
 - **Code Explainer: Save Walkthrough** — Save with a custom name
-- **Code Explainer: Load Walkthrough** — Browse and load saved walkthroughs
+- **Code Explainer: Open Previous Walkthrough** — Browse history and shared walkthroughs
 
-Saved walkthroughs are stored in `.walkthroughs/` at the workspace root with relative file paths, so teammates can pull them and replay on their own machine. The sidebar also shows a browse list of saved walkthroughs when no walkthrough is active.
+Saved walkthroughs are stored in `.walkthroughs/` at the workspace root with relative file paths, so teammates can pull them and replay on their own machine. The sidebar lists them under **Shared in Repo** when no walkthrough is active.
 
 ### ⌨️ Keyboard Shortcuts
 

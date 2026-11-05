@@ -7,6 +7,14 @@ import * as cp from "child_process";
 const SAMPLE_RATE = 24000;
 const SERVER_START_TIMEOUT_MS = 30_000;
 
+/** Must match SENTENCE_SPLIT_RE in scripts/tts_server.py: the server sends one chunk per sentence. */
+const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+/;
+
+/** Split text into sentences exactly as the TTS server does. */
+export function splitSentences(text: string): string[] {
+	return text.trim().split(SENTENCE_SPLIT_RE).filter(Boolean);
+}
+
 export interface TTSOptions {
 	voice: string;
 	speed: number;
@@ -261,14 +269,15 @@ async function ensureServerImpl(): Promise<boolean> {
 /**
  * Streams TTS audio from the Kokoro server.
  * Automatically starts the server if it's not running.
- * Calls onChunk with base64-encoded float32 PCM data for each sentence.
+ * Calls onChunk with base64-encoded float32 PCM data for each sentence,
+ * plus the chunk's index (= index of its sentence in splitSentences(text)).
  * Calls onEnd when the stream completes.
  * Returns a function to abort the stream.
  */
 export function streamTTS(
 	text: string,
 	options: TTSOptions,
-	onChunk: (base64Data: string, sampleRate: number) => void,
+	onChunk: (base64Data: string, sampleRate: number, chunkIndex: number) => void,
 	onEnd: () => void,
 	onError: (err: Error) => void,
 ): () => void {
@@ -298,12 +307,13 @@ export function streamTTS(
 function connectAndStream(
 	text: string,
 	options: TTSOptions,
-	onChunk: (base64Data: string, sampleRate: number) => void,
+	onChunk: (base64Data: string, sampleRate: number, chunkIndex: number) => void,
 	onEnd: () => void,
 	onError: (err: Error) => void,
 	isAborted: () => boolean,
 ): net.Socket {
 	let ended = false;
+	let chunkIndex = 0;
 
 	const port = readPort();
 	const token = readToken();
@@ -357,7 +367,7 @@ function connectAndStream(
 				buffer = buffer.subarray(expectedLength);
 				waitingForHeader = true;
 
-				onChunk(audioBytes.toString("base64"), SAMPLE_RATE);
+				onChunk(audioBytes.toString("base64"), SAMPLE_RATE, chunkIndex++);
 			} else {
 				break;
 			}

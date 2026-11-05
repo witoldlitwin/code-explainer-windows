@@ -10,7 +10,18 @@ let state = {
 	segments: [],
 	currentSegment: -1,
 	status: "idle",
+	/** @type {number[]} segment ids whose code changed since recording */
+	staleSegments: [],
 };
+
+const STALE_TOOLTIP = "Code changed since this walkthrough was recorded; highlights may be off";
+
+/** Mark or unmark an element as belonging to a stale segment. */
+function setStaleMark(el, stale) {
+	el.classList.toggle("stale", stale);
+	if (stale) el.title = STALE_TOOLTIP;
+	else el.removeAttribute("title");
+}
 
 // ── Audio player ──
 
@@ -34,8 +45,131 @@ let deferredPlaybackComplete = false;
 /** Guard: true while waitForActiveSourcesToFinish has a pending wrapper or sent playback_complete */
 let playbackCompleteWired = false;
 
-/** @type {{base64: string, sampleRate: number}[]} */
+/** @typedef {{highlightIndex: number, sentenceIndex: number}} SentenceCue */
+
+/** @type {{base64: string, sampleRate: number, cue: SentenceCue | undefined}[]} */
 let pendingChunks = [];
+
+// ── Narration text ──
+// The current segment's full narration stays visible; the sentence being spoken
+// is highlighted. Each cue spans one sentence's audio on the AudioContext clock,
+// which stops while the context is suspended, so cues stay in sync across pause.
+
+/** Must match SENTENCE_SPLIT_RE in src/tts-bridge.ts (one audio chunk per sentence). */
+const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+/;
+/** Seconds the last sentence stays highlighted after its audio ends. */
+const SENTENCE_LINGER_S = 1;
+
+/** @type {{start: number, end: number, cue: SentenceCue}[]} */
+let sentenceCues = [];
+let sentenceRaf = 0;
+/** Cache key for the rendered narration (segment id + its narration texts). */
+let narrationKey = "";
+/** @type {HTMLElement | null} */
+let activeSentenceEl = null;
+
+function renderNarration(seg) {
+	const box = document.getElementById("narration");
+	if (!box) return;
+	const highlights = (seg && seg.highlights) || [];
+	const key = seg ? `${seg.id}\u0000${highlights.map((h) => h.ttsText || "").join("\u0000")}` : "";
+	if (key === narrationKey) return;
+	narrationKey = key;
+	activeSentenceEl = null;
+	box.innerHTML = "";
+	box.scrollTop = 0;
+	highlights.forEach((h, hi) => {
+		const text = (h.ttsText || "").trim();
+		if (!text) return;
+		const p = document.createElement("p");
+		p.className = "narration-step";
+		p.dataset.highlight = String(hi);
+		text.split(SENTENCE_SPLIT_RE).filter(Boolean).forEach((sentence, si) => {
+			if (si > 0) p.appendChild(document.createTextNode(" "));
+			const span = document.createElement("span");
+			span.className = "narration-sentence";
+			span.dataset.sentence = String(si);
+			span.textContent = sentence;
+			p.appendChild(span);
+		});
+		box.appendChild(p);
+	});
+	markCurrentStep();
+}
+
+/** Emphasize the paragraph of the current highlight and keep it in view. */
+function markCurrentStep() {
+	const box = document.getElementById("narration");
+	if (!box) return;
+	let current = null;
+	for (const p of box.querySelectorAll(".narration-step")) {
+		const isCurrent = p.dataset.highlight === String(currentHighlightIndex);
+		p.classList.toggle("current", isCurrent);
+		if (isCurrent) current = p;
+	}
+	if (current && !activeSentenceEl) scrollIntoBox(box, current);
+}
+
+/** Scroll `el` into view inside the scrollable `box` only (not the whole sidebar). */
+function scrollIntoBox(box, el) {
+	// box is position:relative, so el.offsetTop is already measured from the box
+	const top = el.offsetTop;
+	const bottom = top + el.offsetHeight;
+	if (top < box.scrollTop) {
+		box.scrollTop = top - 4;
+	} else if (bottom > box.scrollTop + box.clientHeight) {
+		box.scrollTop = Math.min(top - 4, bottom - box.clientHeight + 4);
+	}
+}
+
+/** @param {SentenceCue | null} cue */
+function setActiveSentence(cue) {
+	const box = document.getElementById("narration");
+	/** @type {HTMLElement | null} */
+	let el = null;
+	if (box && cue) {
+		el = box.querySelector(
+			`.narration-step[data-highlight="${cue.highlightIndex}"] .narration-sentence[data-sentence="${cue.sentenceIndex}"]`,
+		);
+	}
+	if (el === activeSentenceEl) return;
+	if (activeSentenceEl) activeSentenceEl.classList.remove("active");
+	activeSentenceEl = el;
+	if (el && box) {
+		el.classList.add("active");
+		scrollIntoBox(box, el);
+	}
+}
+
+function tickSentences() {
+	sentenceRaf = 0;
+	if (!audioCtx || sentenceCues.length === 0) return;
+	const now = audioCtx.currentTime;
+	// Drop finished cues, but keep the last one until a new one starts
+	while (sentenceCues.length > 1 && sentenceCues[0].end <= now) sentenceCues.shift();
+	const c = sentenceCues[0];
+	if (c.end + SENTENCE_LINGER_S <= now) {
+		// Narration finished (or the next sentence is late): un-highlight, keep the text
+		clearSentenceCues();
+		return;
+	}
+	// Re-applied every frame, so it also lands once a just-rebuilt narration appears
+	setActiveSentence(c.start <= now ? c.cue : null);
+	sentenceRaf = requestAnimationFrame(tickSentences);
+}
+
+function scheduleSentence(start, end, cue) {
+	if (!cue) return;
+	sentenceCues.push({ start, end, cue });
+	if (!sentenceRaf) sentenceRaf = requestAnimationFrame(tickSentences);
+}
+
+function clearSentenceCues() {
+	sentenceCues = [];
+	if (sentenceRaf) cancelAnimationFrame(sentenceRaf);
+	sentenceRaf = 0;
+	setActiveSentence(null);
+}
 
 function ensureAudioContext() {
 	if (!audioCtx) {
@@ -50,7 +184,7 @@ function ensureAudioContext() {
 			const chunks = pendingChunks.slice();
 			pendingChunks = [];
 			for (const chunk of chunks) {
-				playAudioChunk(chunk.base64, chunk.sampleRate);
+				playAudioChunk(chunk.base64, chunk.sampleRate, chunk.cue);
 			}
 			// If audio_end arrived while suspended, now handle deferred playback completion
 			if (deferredPlaybackComplete) {
@@ -65,12 +199,12 @@ function ensureAudioContext() {
 document.addEventListener("click", () => ensureAudioContext(), { once: true });
 
 
-function playAudioChunk(base64Data, sampleRate) {
+function playAudioChunk(base64Data, sampleRate, cue) {
 	ensureAudioContext();
 
 	// If AudioContext is still suspended (no user gesture yet), queue the chunk
 	if (audioCtx.state === "suspended") {
-		pendingChunks.push({ base64: base64Data, sampleRate });
+		pendingChunks.push({ base64: base64Data, sampleRate, cue });
 		return;
 	}
 
@@ -92,6 +226,7 @@ function playAudioChunk(base64Data, sampleRate) {
 	const now = audioCtx.currentTime;
 	if (nextPlayTime < now) nextPlayTime = now;
 	source.start(nextPlayTime);
+	scheduleSentence(nextPlayTime, nextPlayTime + buffer.duration, cue);
 	nextPlayTime += buffer.duration;
 
 	activeSources.push(source);
@@ -120,6 +255,7 @@ function stopAudio() {
 	audioPlaying = false;
 	deferredPlaybackComplete = false;
 	playbackCompleteWired = false;
+	clearSentenceCues();
 }
 
 /** Suspend AudioContext to freeze audio in place (pause mid-highlight). */
@@ -231,7 +367,9 @@ function render() {
 	const idx = state.segments.findIndex((s) => s.id === state.currentSegment);
 
 	if (seg) {
-		document.getElementById("segment-title").textContent = seg.title;
+		const segTitle = document.getElementById("segment-title");
+		segTitle.textContent = seg.title;
+		setStaleMark(segTitle, state.staleSegments.includes(seg.id));
 
 		const loc = document.getElementById("segment-location");
 		const fileName = seg.file.split("/").pop();
@@ -270,6 +408,9 @@ function render() {
 			explEl.classList.remove("fade-out");
 		}, 150);
 	}
+
+	// Narration text (rebuilt only when the segment or its narration changes)
+	renderNarration(seg);
 
 	// Outline
 	renderOutline(idx);
@@ -381,6 +522,8 @@ function renderOutline(currentIdx) {
 		} else {
 			header.className = "outline-segment-header";
 		}
+
+		setStaleMark(li.querySelector(".segment-label"), state.staleSegments.includes(state.segments[i].id));
 
 		const marker = li.querySelector(".marker");
 		if (i < currentIdx) marker.textContent = "\u2713";
@@ -508,6 +651,10 @@ document.getElementById("btn-restart").addEventListener("click", () => {
 	vscode.postMessage({ type: "restart" });
 });
 
+document.getElementById("btn-history").addEventListener("click", () => {
+	vscode.postMessage({ type: "show_history" });
+});
+
 document.getElementById("btn-save").addEventListener("click", () => {
 	vscode.postMessage({ type: "save" });
 });
@@ -569,6 +716,7 @@ window.addEventListener("message", (event) => {
 			currentHighlightIndex = msg.highlightIndex;
 			totalHighlights = msg.totalHighlights;
 			renderHighlightProgress();
+			markCurrentStep();
 			const hlIdx = state.segments.findIndex((s) => s.id === state.currentSegment);
 			if (hlIdx !== -1) renderOutline(hlIdx);
 			// Update explanation if highlight has its own
@@ -601,6 +749,7 @@ window.addEventListener("message", (event) => {
 				segments: msg.segments,
 				currentSegment: msg.currentSegment,
 				status: msg.status,
+				staleSegments: msg.staleSegments || [],
 			};
 			// Only reset highlight state when the segment actually changed
 			if (prevSegment !== msg.currentSegment) {
@@ -621,7 +770,7 @@ window.addEventListener("message", (event) => {
 			playBtn.classList.remove("loading");
 			playBtn.removeAttribute("aria-busy");
 			playBtn.removeAttribute("aria-disabled");
-			playAudioChunk(msg.data, msg.sampleRate);
+			playAudioChunk(msg.data, msg.sampleRate, msg.cue);
 			break;
 		}
 
@@ -640,6 +789,54 @@ window.addEventListener("message", (event) => {
 		case "audio_resume":
 			resumeAudio();
 			break;
+
+		case "history_list": {
+			const section = document.getElementById("history-section");
+			const list = document.getElementById("history-list");
+			list.innerHTML = "";
+			section.style.display = msg.entries.length === 0 ? "none" : "";
+			for (const entry of msg.entries) {
+				const li = document.createElement("li");
+				li.className = "saved-item history-item";
+				li.tabIndex = 0;
+
+				const info = document.createElement("div");
+				info.className = "history-info";
+				const title = document.createElement("div");
+				title.className = "history-title";
+				title.textContent = entry.title;
+				const meta = document.createElement("div");
+				meta.className = "history-meta";
+				const n = entry.segmentCount;
+				meta.textContent = `${relativeDate(entry.updatedAt)} · ${n} segment${n === 1 ? "" : "s"}`;
+				info.appendChild(title);
+				info.appendChild(meta);
+
+				const del = document.createElement("button");
+				del.className = "icon-btn history-delete";
+				del.title = "Delete from history";
+				del.setAttribute("aria-label", `Delete "${entry.title}" from history`);
+				del.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M10 3h3v1h-1v9.5a1.5 1.5 0 01-1.5 1.5h-5A1.5 1.5 0 014 13.5V4H3V3h3V2a1 1 0 011-1h2a1 1 0 011 1v1zM9 2H7v1h2V2zM5 4v9.5a.5.5 0 00.5.5h5a.5.5 0 00.5-.5V4H5zm1 2h1v6H6V6zm3 0h1v6H9V6z"/></svg>';
+				del.addEventListener("click", (e) => {
+					e.stopPropagation();
+					vscode.postMessage({ type: "delete_history", id: entry.id });
+				});
+
+				const open = () => vscode.postMessage({ type: "open_history", id: entry.id });
+				li.addEventListener("click", open);
+				li.addEventListener("keydown", (e) => {
+					if (e.target === li && (e.key === "Enter" || e.key === " ")) {
+						e.preventDefault();
+						open();
+					}
+				});
+
+				li.appendChild(info);
+				li.appendChild(del);
+				list.appendChild(li);
+			}
+			break;
+		}
 
 		case "saved_list": {
 			const section = document.getElementById("saved-list-section");
@@ -663,6 +860,18 @@ window.addEventListener("message", (event) => {
 		}
 	}
 });
+
+/** Human-friendly relative date, e.g. "5 min ago", "yesterday", "3 Nov 2026". */
+function relativeDate(iso) {
+	const then = new Date(iso);
+	const diffMin = Math.round((Date.now() - then.getTime()) / 60000);
+	if (diffMin < 1) return "just now";
+	if (diffMin < 60) return `${diffMin} min ago`;
+	const diffH = Math.round(diffMin / 60);
+	if (diffH < 24) return `${diffH} h ago`;
+	if (diffH < 48) return "yesterday";
+	return then.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
 
 // Initial render
 render();

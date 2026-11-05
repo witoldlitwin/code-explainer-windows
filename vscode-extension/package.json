@@ -22,7 +22,7 @@
 			{ "command": "codeExplainer.speedUp", "title": "Code Explainer: Speed Up" },
 			{ "command": "codeExplainer.speedDown", "title": "Code Explainer: Speed Down" },
 			{ "command": "codeExplainer.saveWalkthrough", "title": "Code Explainer: Save Walkthrough" },
-			{ "command": "codeExplainer.loadWalkthrough", "title": "Code Explainer: Load Walkthrough" }
+			{ "command": "codeExplainer.loadWalkthrough", "title": "Code Explainer: Open Previous Walkthrough" }
 		],
 		"keybindings": [
 			{ "command": "codeExplainer.togglePlayPause", "key": "ctrl+alt+space", "when": "codeExplainer.walkthroughActive" },
